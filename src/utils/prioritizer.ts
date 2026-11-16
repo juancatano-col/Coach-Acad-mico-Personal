@@ -8,6 +8,8 @@ import type {
 } from '../types/coach';
 
 const SLEEP_CUTOFF_MINUTES = 22 * 60 + 30; // 22:30 America/Bogota
+export const MAX_STUDY_BLOCK_MINUTES = 90;
+const NIGHT_FORBIDDEN_END_MINUTES = 5 * 60 + 30; // 00:00 - 05:29 prohibido
 
 export function parseTimeToMinutes(hhmm: string): number {
   const match = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim());
@@ -272,7 +274,7 @@ export function evaluateDeterministicPlan(
     });
   }
 
-  const maxSessionMinutes = isLowEnergy ? 45 : 75;
+  const maxSessionMinutes = isLowEnergy ? 45 : MAX_STUDY_BLOCK_MINUTES;
   const workMinutes = Math.min(
     chosen.estimatedMinutes,
     effectiveAvailableMinutes,
@@ -337,3 +339,66 @@ export function validateNewTask(input: {
   }
   return { valid: true };
 }
+
+export function validateDecisionTimeWindow(
+  decision: CoachDecision,
+  state: StudentContextState,
+  tasks: AcademicTask[]
+): CoachDecision {
+  const startMin = parseTimeToMinutes(decision.blockStart);
+  const endMin = parseTimeToMinutes(decision.blockEnd);
+  const expectedStartMin = parseTimeToMinutes(state.currentTimeHHMM);
+  const hasValidFormat =
+    /^\d{2}:\d{2}$/.test(decision.blockStart) && /^\d{2}:\d{2}$/.test(decision.blockEnd);
+
+  const isMadrugada =
+    startMin < NIGHT_FORBIDDEN_END_MINUTES ||
+    (decision.assignedMinutes > 0 && endMin < NIGHT_FORBIDDEN_END_MINUTES);
+  const wrapsMidnight = decision.assignedMinutes > 0 && endMin < startMin;
+  const exceedsSleepCutoff =
+    startMin >= 17 * 60 && decision.assignedMinutes > 0 && endMin > SLEEP_CUTOFF_MINUTES;
+  const startDriftedTooFar = Math.abs(startMin - expectedStartMin) > 60;
+
+  // Validar regla dura de carga cognitiva en fatiga o tránsito
+  const selectedTask = decision.selectedTaskId
+    ? tasks.find((t) => t.id === decision.selectedTaskId)
+    : undefined;
+  const hoursUntilSelected = selectedTask
+    ? getHoursUntilDue(selectedTask.dueIso, buildCurrentTimestampIso(state))
+    : 999;
+  const isEmergency = hoursUntilSelected <= 10;
+  const violatesLowEnergy =
+    state.currentEnergyLevel < 4 && decision.selectedLoad === 'high' && !isEmergency;
+  const violatesTransit = state.userLocation === 'transit' && decision.selectedLoad === 'high';
+
+  if (
+    !hasValidFormat ||
+    isMadrugada ||
+    wrapsMidnight ||
+    exceedsSleepCutoff ||
+    startDriftedTooFar ||
+    violatesLowEnergy ||
+    violatesTransit
+  ) {
+    const safeDecision = evaluateDeterministicPlan(state, tasks);
+    return {
+      ...safeDecision,
+      ruleApplied: `[Guardrail Post-LLM] Alucinación o regla violada bloqueada automáticamente · ${safeDecision.ruleApplied}`,
+    };
+  }
+
+  // Aplicar tope máximo estricto de 90 minutos por bloque
+  if (decision.assignedMinutes > MAX_STUDY_BLOCK_MINUTES) {
+    const clampedMinutes = MAX_STUDY_BLOCK_MINUTES;
+    const clampedEnd = formatMinutesToHHMM(startMin + clampedMinutes);
+    return {
+      ...decision,
+      assignedMinutes: clampedMinutes,
+      blockEnd: clampedEnd,
+      ruleApplied: `${decision.ruleApplied} (Bloque acotado al límite máximo de 90 min).`,
+    };
+  }
+
+  return decision;
+}
+

@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import {
   buildCoachPayload,
   evaluateDeterministicPlan,
+  MAX_STUDY_BLOCK_MINUTES,
+  validateDecisionTimeWindow,
   validateNewTask,
 } from './prioritizer';
-import type { AcademicTask, StudentContextState } from '../types/coach';
+import type { AcademicTask, CoachDecision, StudentContextState } from '../types/coach';
 
 const SAMPLE_TASKS: AcademicTask[] = [
   {
@@ -59,7 +61,7 @@ test('discard high cognitive load task when energy is below 4 and select low loa
   );
 });
 
-test('prioritize high cognitive load task when energy is high and user is home', () => {
+test('prioritize high cognitive load task when energy is high and cap block at 90 minutes', () => {
   const highEnergyState: StudentContextState = {
     ...BASE_STATE,
     currentEnergyLevel: 8,
@@ -69,6 +71,8 @@ test('prioritize high cognitive load task when energy is high and user is home',
   const decision = evaluateDeterministicPlan(highEnergyState, SAMPLE_TASKS);
   assert.equal(decision.selectedTaskId, 't1');
   assert.equal(decision.selectedLoad, 'high');
+  assert.equal(decision.assignedMinutes, MAX_STUDY_BLOCK_MINUTES);
+  assert.equal(decision.blockEnd, '10:30');
 });
 
 test('block high cognitive load tasks while in transit from Girardota', () => {
@@ -131,3 +135,54 @@ test('task validator rejects empty titles and invalid durations', () => {
     true
   );
 });
+
+test('post-LLM validator blocks 03:00 AM hallucination and recovers safe plan', () => {
+  const hallucinated: CoachDecision = {
+    selectedTaskId: 't2',
+    selectedTaskTitle: 'Lectura de Ética Profesional (Cap. 4)',
+    selectedCourse: 'Ética y Ciudadanía',
+    selectedLoad: 'low',
+    blockStart: '03:00',
+    blockEnd: '03:45',
+    assignedMinutes: 45,
+    breakMinutes: 5,
+    cutoffProtected: false,
+    ruleApplied: 'Alucinación de madrugada',
+    instructionMessage: 'Estudia a las 3:00 AM.',
+    discardedTasks: [],
+    source: 'gemini-ai',
+  };
+  const guarded = validateDecisionTimeWindow(hallucinated, BASE_STATE, SAMPLE_TASKS);
+  assert.equal(guarded.blockStart, '20:30');
+  assert.equal(guarded.blockEnd, '21:15');
+  assert.equal(guarded.source, 'rules-engine');
+  assert.match(guarded.ruleApplied, /Guardrail Post-LLM/);
+});
+
+test('post-LLM validator clamps blocks exceeding 90 minutes', () => {
+  const highState: StudentContextState = {
+    ...BASE_STATE,
+    currentEnergyLevel: 8,
+    currentTimeHHMM: '09:00',
+    availableMinutes: 120,
+  };
+  const oversized: CoachDecision = {
+    selectedTaskId: 't1',
+    selectedTaskTitle: 'Proyecto Arquitectura de Datos (Python ETL)',
+    selectedCourse: 'Arquitectura de Datos',
+    selectedLoad: 'high',
+    blockStart: '09:00',
+    blockEnd: '11:00',
+    assignedMinutes: 120,
+    breakMinutes: 5,
+    cutoffProtected: false,
+    ruleApplied: 'Bloque largo',
+    instructionMessage: 'Trabaja 120 minutos.',
+    discardedTasks: [],
+    source: 'gemini-ai',
+  };
+  const guarded = validateDecisionTimeWindow(oversized, highState, SAMPLE_TASKS);
+  assert.equal(guarded.assignedMinutes, 90);
+  assert.equal(guarded.blockEnd, '10:30');
+});
+

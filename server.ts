@@ -4,9 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
-import { buildCoachPayload } from './src/utils/prioritizer.ts';
+import { buildCoachPayload, validateDecisionTimeWindow } from './src/utils/prioritizer.ts';
 import { SYSTEM_PROMPT_TEXT } from './src/data/seedData.ts';
-import type { AcademicTask, StudentContextState } from './src/types/coach.ts';
+import type { AcademicTask, CoachDecision, StudentContextState } from './src/types/coach.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -170,24 +170,28 @@ async function startServer() {
           ? parsed.selectedLoad
           : null;
 
+      const rawDecision: CoachDecision = {
+        selectedTaskId: parsed.selectedTaskId || null,
+        selectedTaskTitle: parsed.selectedTaskTitle || null,
+        selectedCourse: parsed.selectedCourse || null,
+        selectedLoad: validLoad,
+        blockStart: parsed.blockStart || contextState.currentTimeHHMM,
+        blockEnd: parsed.blockEnd || contextState.currentTimeHHMM,
+        assignedMinutes: Number(parsed.assignedMinutes) || 0,
+        breakMinutes: Number(parsed.breakMinutes) || 0,
+        cutoffProtected: Boolean(parsed.cutoffProtected),
+        ruleApplied: parsed.ruleApplied || 'Evaluación generada por Gemini.',
+        instructionMessage: parsed.instructionMessage || '',
+        discardedTasks: Array.isArray(parsed.discardedTasks)
+          ? parsed.discardedTasks
+          : [],
+        source: 'gemini-ai',
+      };
+
+      const safeDecision = validateDecisionTimeWindow(rawDecision, contextState, tasks);
+
       res.json({
-        decision: {
-          selectedTaskId: parsed.selectedTaskId || null,
-          selectedTaskTitle: parsed.selectedTaskTitle || null,
-          selectedCourse: parsed.selectedCourse || null,
-          selectedLoad: validLoad,
-          blockStart: parsed.blockStart || contextState.currentTimeHHMM,
-          blockEnd: parsed.blockEnd || contextState.currentTimeHHMM,
-          assignedMinutes: Number(parsed.assignedMinutes) || 0,
-          breakMinutes: Number(parsed.breakMinutes) || 0,
-          cutoffProtected: Boolean(parsed.cutoffProtected),
-          ruleApplied: parsed.ruleApplied || 'Evaluación generada por Gemini.',
-          instructionMessage: parsed.instructionMessage || '',
-          discardedTasks: Array.isArray(parsed.discardedTasks)
-            ? parsed.discardedTasks
-            : [],
-          source: 'gemini-ai',
-        },
+        decision: safeDecision,
         payload,
       });
     } catch (err) {
